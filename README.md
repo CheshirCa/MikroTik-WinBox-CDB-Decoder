@@ -1,40 +1,47 @@
-# CDB Reader
+# CDB Reader 2.0
 
-A console utility for reading address-book records from MikroTik WinBox 3.* CDB files.
+A console utility written in PureBasic for reading MikroTik WinBox address-book CDB files (WinBox 3.x and 4.x) and converting legacy Cyrillic text for use with WinBox 4.
 
-The program loads a `.cdb` file, finds address-book records, decodes string fields from Windows-1251, and prints the result in one of several formats: table, CSV, JSON, or a group-based tree.
+The utility detects the CDB record format, decodes Windows-1251 and UTF-8 text, and prints the address book as a table, CSV, JSON, or a group-based tree. By default, it prints the original seven-column table.
 
 ## Features
 
-- reads MikroTik address-book CDB files;
-- correctly displays Cyrillic text stored as CP1251;
-- outputs the `Name`, `Address`, `User`, `Group`, `Owner`, `Key`, and `Note` fields;
-- supports several output formats;
-- opens the file in shared-read mode, so it can still be inspected by other tools while the program is reading it.
+- Reads address-book CDB files created by WinBox 3.x and WinBox 4.x.
+- Detects and displays the file format (`WinBox 3.x CDB` or `WinBox 4.x CDB`) and the record count in the human-readable output.
+- Reads legacy CP1251 Cyrillic and UTF-8 text, including UTF-8 text stored in a WinBox 3-style CDB.
+- Preserves the original output columns: `Name`, `Address`, `User`, `Group`, `Owner`, `Key`, `Note`.
+- Supports `TABLE` (default), `CSV`, `JSON`, and `TREE` output modes.
+- Supports `/convert <src.cdb> <dst.cdb>` to convert legacy WinBox 3 text to UTF-8 **without changing the WinBox 3 record wrapper**.
+- Conversion writes a separate destination file and refuses to overwrite an existing file.
 
-## Supported Fields
+## Supported fields
 
-| CDB field id | Output field |
-| --- | --- |
-| `$01` | `Address` |
-| `$02` | `User` |
-| `$03` | `Key` |
-| `$04` | `Name` |
-| `$06` | `Owner` |
-| `$08` | `Group` |
-| `$0B` | `Note` |
+The following mappings are used by the reader. The console column names are retained from version 1.x for compatibility.
 
-Unknown fields are skipped.
+| CDB field ID | Parsed value | Existing output column |
+| --- | --- | --- |
+| `$01` | Address | `Address` |
+| `$02` | Login | `User` |
+| `$03` | Password / saved key | `Key` |
+| `$04` | Comment / connection label | `Name` |
+| `$06` | Session/owner data (WinBox 3); keep-password data (WinBox 4) | `Owner` for WinBox 3 |
+| `$08` | Group | `Group` |
+| `$0B` | RoMON-related value | `Note` |
+| `$0C` | Workspace (WinBox 4) | Not in legacy output |
+| Special `09 00 FE 21` | Display name (WinBox 4) | Not in legacy output |
+
+Additional fields may be parsed internally but are not added to the existing seven-column output. Unknown fields are not shown. The complete CDB specification is not publicly documented; some field interpretations remain provisional.
 
 ## Usage
 
-The basic command prints a human-readable table:
+Print the address book as a table (default):
 
 ```powershell
 cdb.exe file.cdb
+cdb.exe file.cdb TABLE
 ```
 
-You can select the output format with the second argument:
+Other output formats:
 
 ```powershell
 cdb.exe file.cdb CSV
@@ -42,7 +49,7 @@ cdb.exe file.cdb JSON
 cdb.exe file.cdb TREE
 ```
 
-Prefixed options and explicit output keys are also supported:
+The previously supported option variants are retained:
 
 ```powershell
 cdb.exe file.cdb /CSV
@@ -52,23 +59,25 @@ cdb.exe file.cdb /OUTPUT CSV
 cdb.exe file.cdb --format JSON
 ```
 
-`TABLE` is the default format, but it can also be passed explicitly:
+Convert an old WinBox 3 address book for import into WinBox 4:
 
 ```powershell
-cdb.exe file.cdb TABLE
+cdb.exe /convert old.cdb converted.cdb
 ```
 
-## Output Formats
+The input must be a WinBox 3-style CDB. The program converts selected text fields (`$04`, `$06`, `$08`, `$0B`) from Windows-1251 to UTF-8 as necessary, updates the affected field and record lengths, and leaves other data, including the password field `$03`, unchanged. Strings that already pass UTF-8 validation are not converted again. The output **still has the WinBox 3 record structure**; this is intentional, because WinBox 4.4 can import such files with UTF-8 text.
+
+Back up the original CDB and test the converted address book before replacing any working data. Compatibility has been checked with test records, including a multi-record book, but not every possible combination of saved passwords, sessions, and RoMON settings.
+
+## Output formats
 
 ### TABLE
 
-Prints records as an ASCII table. This is useful for quick inspection in the console.
+An ASCII table with the original seven columns. The format/version and record count are shown above the table.
 
 ### CSV
 
-Prints CSV with a header row. Every cell is wrapped in double quotes, and quotes inside values are escaped according to RFC 4180.
-
-Example:
+A header row followed by quoted fields. Double quotes inside values are escaped in accordance with RFC 4180. The existing CSV column names and order have not changed.
 
 ```powershell
 cdb.exe file.cdb CSV > address-book.csv
@@ -76,9 +85,7 @@ cdb.exe file.cdb CSV > address-book.csv
 
 ### JSON
 
-Prints an array of JSON objects. This format is suitable for further processing by scripts.
-
-Example:
+An array of JSON objects with the original property names; no version metadata is added to the JSON output.
 
 ```powershell
 cdb.exe file.cdb JSON > address-book.json
@@ -86,91 +93,83 @@ cdb.exe file.cdb JSON > address-book.json
 
 ### TREE
 
-Groups records by the `Group` field and prints them as a tree. Empty groups are displayed as `(no group)`.
+Records grouped by `Group`. An empty group is shown as `(no group)`.
 
 ```powershell
 cdb.exe file.cdb TREE
 ```
 
+**Security:** `Key` may contain saved credentials. Treat console output and exported CSV/JSON files as sensitive data; do not publish real address books or diagnostic files containing passwords.
+
 ## Build
 
-Source file: `cdb.pb`.
-
-PureBasic 6.40 or a compatible version is required. Example command for Windows:
+Source: `cdb.pb`. PureBasic 6.40 or a compatible 6.x version; console application, no external dependencies.
 
 ```powershell
 & 'C:\Program Files (x86)\PureBasic\Compilers\pbcompiler.exe' 'cdb.pb' /OUTPUT 'cdb.exe' /CONSOLE
 ```
 
-Syntax check without creating an executable:
+Syntax check:
 
 ```powershell
 & 'C:\Program Files (x86)\PureBasic\Compilers\pbcompiler.exe' 'cdb.pb' /CHECK
 ```
 
-## How the Parser Works
+## File handling and limitations
 
-The parser reads the whole file into memory because it needs random byte access and frequent lookahead checks.
-
-A record boundary is detected by a stable marker inside the record header:
-
-```text
-00 00 00 4D 32
-```
-
-String fields are detected by this pattern:
-
-```text
-<field-id> 00 00 21 <length> <cp1251 bytes>
-```
-
-`length` defines the exact number of bytes in the string. After decoding the string, the parser skips over the full encoded payload so service bytes after the string are not printed as data.
-
-## Limitations
-
-- Only the known address-book string fields listed above are supported.
-- String length is read from a single `length` byte.
-- The CDB format is not fully documented here; the parser is based on observed MikroTik WinBox address-book file structures.
+- Both formats use the CDB signature `0D F0 1D C0` and length-prefixed `M2` records. WinBox 3 and 4 are distinguished by their record structure, **not by the exact application version**.
+- The reader uses record lengths to find record boundaries. Recognized string fields use a one-byte length; the special display-name field has a different marker.
+- Encoding is selected at the string level. A byte sequence that is valid UTF-8 is treated as UTF-8, including in a WinBox 3-style file. Ambiguous byte sequences may therefore be interpreted differently from the original text.
+- Conversion is supported **from WinBox 3-style files only**. It is not a WinBox 4-to-3 converter and does not rebuild the native WinBox 4 record structure.
+- The converter preserves fields it does not intentionally change, but CDB parsing still depends on observed, not fully documented structures. Use a copy and verify the result in WinBox before production use.
+- Some WinBox 4 fields are recognized internally but deliberately omitted from the legacy table/CSV/JSON schema.
 
 ---
 
-# CDB Reader
+# CDB Reader 2.0
 
-Консольная утилита для чтения address-book записей из MikroTik WinBox 3.* CDB-файлов.
+Консольная утилита на PureBasic для чтения адресных книг MikroTik WinBox 3.x и 4.x в формате CDB и преобразования старой кириллицы для импорта в WinBox 4.
 
-Программа загружает `.cdb` файл, находит записи адресной книги, декодирует строковые поля из Windows-1251 и выводит результат в одном из нескольких форматов: таблица, CSV, JSON или дерево по группам.
+Программа определяет формат записей CDB, читает текст в Windows-1251 и UTF-8 и выводит адресную книгу в виде таблицы, CSV, JSON или дерева по группам. По умолчанию, как и в версии 1.x, используется таблица с семью столбцами.
 
 ## Возможности
 
-- чтение MikroTik CDB-файлов адресной книги;
-- корректное отображение кириллицы из CP1251;
-- вывод полей `Name`, `Address`, `User`, `Group`, `Owner`, `Key`, `Note`;
-- несколько форматов вывода;
-- shared-read открытие файла, чтобы его можно было параллельно смотреть другими инструментами.
+- Чтение файлов адресной книги WinBox 3.x и WinBox 4.x.
+- Определение формата (`WinBox 3.x CDB` или `WinBox 4.x CDB`) и вывод количества записей в обычном консольном режиме.
+- Корректное чтение кириллицы CP1251 и UTF-8, в том числе UTF-8 внутри старой структуры CDB.
+- Сохранение прежних полей вывода: `Name`, `Address`, `User`, `Group`, `Owner`, `Key`, `Note`.
+- Режимы `TABLE` (по умолчанию), `CSV`, `JSON`, `TREE`.
+- Ключ `/convert <src.cdb> <dst.cdb>` для преобразования текстовых полей из CP1251 в UTF-8 **без изменения структуры записей WinBox 3**.
+- Создание отдельного выходного файла без перезаписи существующего.
 
 ## Поддерживаемые поля
 
-| CDB field id | Поле вывода |
-| --- | --- |
-| `$01` | `Address` |
-| `$02` | `User` |
-| `$03` | `Key` |
-| `$04` | `Name` |
-| `$06` | `Owner` |
-| `$08` | `Group` |
-| `$0B` | `Note` |
+Ниже показано, как парсер трактует поля. Названия столбцов консольного вывода оставлены от версии 1.x для совместимости.
 
-Неизвестные поля пропускаются.
+| ID поля CDB | Назначение | Прежний столбец вывода |
+| --- | --- | --- |
+| `$01` | Адрес | `Address` |
+| `$02` | Логин | `User` |
+| `$03` | Сохранённый пароль / ключ | `Key` |
+| `$04` | Комментарий / название подключения | `Name` |
+| `$06` | Session/Owner (WinBox 3), признак сохранения пароля (WinBox 4) | `Owner` для WinBox 3 |
+| `$08` | Группа | `Group` |
+| `$0B` | Значение, связанное с RoMON | `Note` |
+| `$0C` | Workspace (WinBox 4) | Не выводится в прежних форматах |
+| Особый маркер `09 00 FE 21` | Display name (WinBox 4) | Не выводится в прежних форматах |
+
+Некоторые дополнительные поля распознаются внутри парсера, но не добавлены в привычные семь столбцов. Неизвестные поля не выводятся. Полного официального описания CDB нет, поэтому трактовка части служебных полей пока предварительная.
 
 ## Использование
 
-Базовый запуск выводит человекочитаемую таблицу:
+Обычный запуск, таблица по умолчанию:
 
 ```powershell
 cdb.exe file.cdb
+cdb.exe file.cdb TABLE
 ```
 
-Можно выбрать формат вторым аргументом:
+Остальные форматы:
 
 ```powershell
 cdb.exe file.cdb CSV
@@ -178,7 +177,7 @@ cdb.exe file.cdb JSON
 cdb.exe file.cdb TREE
 ```
 
-Также поддерживаются варианты с префиксами и явным ключом:
+Старые варианты вызова сохранены:
 
 ```powershell
 cdb.exe file.cdb /CSV
@@ -188,23 +187,27 @@ cdb.exe file.cdb /OUTPUT CSV
 cdb.exe file.cdb --format JSON
 ```
 
-Формат `TABLE` используется по умолчанию, но его тоже можно указать явно:
+Перекодирование адресной книги WinBox 3 для импорта в WinBox 4:
 
 ```powershell
-cdb.exe file.cdb TABLE
+cdb.exe /convert old.cdb converted.cdb
 ```
+
+Исходный файл должен иметь структуру записей WinBox 3. Программа при необходимости перекодирует поля `$04`, `$06`, `$08`, `$0B` из CP1251 в UTF-8, пересчитывает длины строк и записей, но не меняет остальные данные, включая поле пароля `$03`. Если строка уже распознаётся как корректный UTF-8, повторная перекодировка не выполняется.
+
+**Выходной файл остаётся в формате записей WinBox 3.** Это сделано специально: мы проверили, что WinBox 4.4 импортирует такие CDB при правильной кодировке строк. В тестах успешно открывались как одиночная запись, так и адресная книга с несколькими записями.
+
+Перед конвертацией сохрани копию оригинального CDB. На реальных книгах с паролями, RoMON и разными вариантами сессий перенос всех комбинаций пока не проверен. Результат лучше сначала импортировать в тестовый экземпляр WinBox и сравнить записи.
 
 ## Форматы вывода
 
 ### TABLE
 
-Выводит записи в виде ASCII-таблицы. Удобно для быстрого просмотра в консоли.
+ASCII-таблица с прежними семью столбцами. Над таблицей выводятся формат CDB и количество записей.
 
 ### CSV
 
-Выводит CSV с заголовком. Каждая ячейка заключается в двойные кавычки, кавычки внутри значений экранируются по правилам RFC 4180.
-
-Пример сохранения:
+CSV с заголовком. Значения заключаются в двойные кавычки; кавычки внутри полей экранируются по RFC 4180. Названия и порядок столбцов сохранены.
 
 ```powershell
 cdb.exe file.cdb CSV > address-book.csv
@@ -212,9 +215,7 @@ cdb.exe file.cdb CSV > address-book.csv
 
 ### JSON
 
-Выводит массив JSON-объектов. Подходит для дальнейшей обработки скриптами.
-
-Пример сохранения:
+Массив JSON-объектов с прежними именами полей. Служебная информация о версии не добавляется внутрь JSON.
 
 ```powershell
 cdb.exe file.cdb JSON > address-book.json
@@ -222,49 +223,33 @@ cdb.exe file.cdb JSON > address-book.json
 
 ### TREE
 
-Группирует записи по полю `Group` и выводит их деревом. Если группа пустая, она отображается как `(no group)`.
+Дерево записей по полю `Group`. Пустая группа выводится как `(no group)`.
 
 ```powershell
 cdb.exe file.cdb TREE
 ```
 
+**Безопасность:** в поле `Key` могут быть сохранённые учётные данные. Консольный вывод и файлы CSV/JSON с реальными адресными книгами нельзя без проверки выкладывать в открытый доступ.
+
 ## Сборка
 
-Исходный файл: `cdb.pb`.
-
-Требуется PureBasic 6.40 или совместимая версия. Пример команды для Windows:
+Исходник: `cdb.pb`. Нужен PureBasic 6.40 или совместимая версия 6.x. Внешних зависимостей нет.
 
 ```powershell
 & 'C:\Program Files (x86)\PureBasic\Compilers\pbcompiler.exe' 'cdb.pb' /OUTPUT 'cdb.exe' /CONSOLE
 ```
 
-Проверка синтаксиса без создания исполняемого файла:
+Проверка синтаксиса:
 
 ```powershell
 & 'C:\Program Files (x86)\PureBasic\Compilers\pbcompiler.exe' 'cdb.pb' /CHECK
 ```
 
-## Как работает парсер
+## Формат CDB и ограничения
 
-Парсер читает файл целиком в память, потому что ему нужен произвольный доступ к байтам и проверка нескольких байтов вперед.
-
-Граница записи определяется по стабильному маркеру внутри заголовка:
-
-```text
-00 00 00 4D 32
-```
-
-Строковые поля ищутся по шаблону:
-
-```text
-<field-id> 00 00 21 <length> <cp1251 bytes>
-```
-
-`length` задает точное количество байтов строки. После декодирования парсер перескакивает через всю строку, чтобы служебные байты после нее не попадали в вывод.
-
-## Ограничения
-
-- Поддерживаются только известные строковые поля адресной книги, перечисленные выше.
-- Длина строки берется из одного байта поля `length`.
-- Формат CDB не документирован здесь полностью; парсер ориентирован на наблюдаемые структуры MikroTik WinBox address-book файлов.
-
+- Оба варианта файла используют сигнатуру `0D F0 1D C0` и записи `M2` с длинами. WinBox 3 и 4 определяются по структуре записей, **не по точному номеру версии WinBox**.
+- Границы записей находятся по длинам. У распознаваемых строковых полей длина задаётся одним байтом; для дополнительного имени есть особый маркер.
+- Кодировка определяется отдельно для каждой строки. Если байты допустимы как UTF-8, они читаются как UTF-8 даже в структуре WinBox 3. Для неоднозначных последовательностей это может дать неверное прочтение старого текста.
+- `/convert` принимает **только CDB со структурой WinBox 3**. Обратной конвертации 4 → 3 нет; нативная структура WinBox 4 не генерируется.
+- Неизвестные данные при конвертации предполагается сохранять без изменений, но разбор CDB основан на исследованных образцах, а не на полной спецификации. Используй резервную копию и проверяй импорт до замены рабочей книги.
+- Дополнительные поля WinBox 4 могут распознаваться, но не включаются в прежние форматы TABLE/CSV/JSON, чтобы не ломать совместимость.
