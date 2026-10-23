@@ -1,4 +1,4 @@
-# CDB Reader 2.0
+# CDB Reader 2.1
 
 A console utility written in PureBasic for reading MikroTik WinBox address-book CDB files (WinBox 3.x and 4.x) and converting legacy Cyrillic text for use with WinBox 4.
 
@@ -13,6 +13,8 @@ The utility detects the CDB record format, decodes Windows-1251 and UTF-8 text, 
 - Supports `TABLE` (default), `CSV`, `JSON`, and `TREE` output modes.
 - Supports `/convert <src.cdb> <dst.cdb>` to convert legacy WinBox 3 text to UTF-8 **without changing the WinBox 3 record wrapper**.
 - Conversion writes a separate destination file and refuses to overwrite an existing file.
+- Source Windows code page can be selected with `/CPxxxx` (default: `/CP1251`).
+- `/translit` transliterates non-ASCII text to ASCII instead of storing UTF-8; unknown characters become `?`.
 
 ## Supported fields
 
@@ -63,7 +65,16 @@ Convert an old WinBox 3 address book for import into WinBox 4:
 
 ```powershell
 cdb.exe /convert old.cdb converted.cdb
+cdb.exe /convert old.cdb converted.cdb /CP1250
+cdb.exe /convert old.cdb converted.cdb /CP1252 /translit
+cdb.exe /translit old.cdb ascii.cdb /CP1251
 ```
+
+The input must be a WinBox 3-style CDB. The `/CPxxxx` value is a Windows code page number, for example 1251 (Cyrillic), 1250 (Central European) or 1252 (Western European). Without the option, CP1251 is used. On Windows the conversion uses `MultiByteToWideChar`. An already valid UTF-8 field remains unchanged in normal conversion mode.
+
+`/translit` is a separate ASCII-output option. It transliterates Cyrillic and several common Latin accented characters, strips a few signs, and replaces other non-ASCII characters with `?`. It is **lossy**, unlike UTF-8 conversion. ASCII fields and binary fields are preserved. The transliteration is intended for labels and groups, not for passwords. Do not use it if preserving the exact original spelling is important.
+
+The original code page is not stored in a typical WinBox 3 CDB. Automatic detection is unreliable; specify it explicitly for non-CP1251 books. Also, an occasional legacy byte sequence can coincidentally pass UTF-8 validation, so back up and inspect the result.
 
 The input must be a WinBox 3-style CDB. The program converts selected text fields (`$04`, `$06`, `$08`, `$0B`) from Windows-1251 to UTF-8 as necessary, updates the affected field and record lengths, and leaves other data, including the password field `$03`, unchanged. Strings that already pass UTF-8 validation are not converted again. The output **still has the WinBox 3 record structure**; this is intentional, because WinBox 4.4 can import such files with UTF-8 text.
 
@@ -126,7 +137,7 @@ Syntax check:
 
 ---
 
-# CDB Reader 2.0
+# CDB Reader 2.1
 
 Консольная утилита на PureBasic для чтения адресных книг MikroTik WinBox 3.x и 4.x в формате CDB и преобразования старой кириллицы для импорта в WinBox 4.
 
@@ -191,6 +202,9 @@ cdb.exe file.cdb --format JSON
 
 ```powershell
 cdb.exe /convert old.cdb converted.cdb
+cdb.exe /convert old.cdb converted.cdb /CP1250
+cdb.exe /convert old.cdb converted.cdb /CP1252 /translit
+cdb.exe /translit old.cdb ascii.cdb /CP1251
 ```
 
 Исходный файл должен иметь структуру записей WinBox 3. Программа при необходимости перекодирует поля `$04`, `$06`, `$08`, `$0B` из CP1251 в UTF-8, пересчитывает длины строк и записей, но не меняет остальные данные, включая поле пароля `$03`. Если строка уже распознаётся как корректный UTF-8, повторная перекодировка не выполняется.

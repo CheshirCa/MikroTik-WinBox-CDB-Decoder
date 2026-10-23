@@ -1,5 +1,5 @@
 ; MikroTik WinBox CDB reader and CP1251 to UTF-8 converter preserving v3 wrapper.
-; Experimental writer: always creates a new file. Test with a backup.
+; Version 2.1. Always creates a new output file. Test with a backup.
 ; PureBasic 6.x, console executable. No external dependencies.
 ; Copyright (C) CheshirCa 2026
 ; https://t.me/cheshircanest
@@ -388,6 +388,151 @@ Procedure PrintOutput(Format.i)
   EndSelect
 EndProcedure
 
+; Conversion settings (reader behavior is unchanged).
+Global ConvertCodePage.i = 1251
+Global ConvertTranslit.i = #False
+
+Procedure.s DecodeCodePage(*Data, ByteCount.i, Page.i)
+  Protected units.i, *wide, output.s
+  If ByteCount=0 : ProcedureReturn "" : EndIf
+  units=MultiByteToWideChar_(Page, 0, *Data, ByteCount, 0, 0)
+  If units<=0 : ProcedureReturn "" : EndIf
+  *wide=AllocateMemory((units+1)*SizeOf(Character))
+  If *wide=0 : ProcedureReturn "" : EndIf
+  If MultiByteToWideChar_(Page, 0, *Data, ByteCount, *wide, units)<>units
+    FreeMemory(*wide) : ProcedureReturn ""
+  EndIf
+  PokeW(*wide+units*2,0)
+  output=PeekS(*wide,units,#PB_Unicode)
+  FreeMemory(*wide)
+  ProcedureReturn output
+EndProcedure
+
+; ASCII-only transliteration. Unsupported non-ASCII code points are replaced
+; with '?', never silently dropped. CP1251 Cyrillic plus common Latin diacritics.
+Procedure.s Transliterate(Value.s)
+  Protected i.i, c.i, out.s="", a.s
+  For i=1 To Len(Value)
+    c=Asc(Mid(Value,i,1))
+    a=""
+    If c<128
+      a=Chr(c)
+    Else
+      Select c
+        Case $410 To $42F
+          Select c
+            Case $416 : a="Zh"
+            Case $427 : a="Ch"
+            Case $428 : a="Sh"
+            Case $429 : a="Shch"
+            Case $42E : a="Yu"
+            Case $42F : a="Ya"
+            Case $426 : a="Ts"
+            Case $42A, $42C : a=""
+            Case $42B : a="Y"
+            Case $42D : a="E"
+            Default
+              a=""
+              Select c
+                Case $410 : a="A"
+                Case $411 : a="B"
+                Case $412 : a="V"
+                Case $413 : a="G"
+                Case $414 : a="D"
+                Case $415 : a="E"
+                Case $417 : a="Z"
+                Case $418 : a="I"
+                Case $419 : a="Y"
+                Case $41A : a="K"
+                Case $41B : a="L"
+                Case $41C : a="M"
+                Case $41D : a="N"
+                Case $41E : a="O"
+                Case $41F : a="P"
+                Case $420 : a="R"
+                Case $421 : a="S"
+                Case $422 : a="T"
+                Case $423 : a="U"
+                Case $424 : a="F"
+                Case $425 : a="Kh"
+              EndSelect
+          EndSelect
+        Case $430 To $44F
+          Select c
+            Case $436 : a="zh"
+            Case $447 : a="ch"
+            Case $448 : a="sh"
+            Case $449 : a="shch"
+            Case $44E : a="yu"
+            Case $44F : a="ya"
+            Case $446 : a="ts"
+            Case $44A, $44C : a=""
+            Case $44B : a="y"
+            Case $44D : a="e"
+            Default
+              Select c
+                Case $430 : a="a"
+                Case $431 : a="b"
+                Case $432 : a="v"
+                Case $433 : a="g"
+                Case $434 : a="d"
+                Case $435 : a="e"
+                Case $437 : a="z"
+                Case $438 : a="i"
+                Case $439 : a="y"
+                Case $43A : a="k"
+                Case $43B : a="l"
+                Case $43C : a="m"
+                Case $43D : a="n"
+                Case $43E : a="o"
+                Case $43F : a="p"
+                Case $440 : a="r"
+                Case $441 : a="s"
+                Case $442 : a="t"
+                Case $443 : a="u"
+                Case $444 : a="f"
+                Case $445 : a="kh"
+              EndSelect
+          EndSelect
+        Case $401 : a="Yo"
+        Case $451 : a="yo"
+        Case $404 : a="Ye"
+        Case $454 : a="ye"
+        Case $406 : a="I"
+        Case $456 : a="i"
+        Case $407 : a="Yi"
+        Case $457 : a="yi"
+        Case $490 : a="G"
+        Case $491 : a="g"
+        Case $40E : a="U"
+        Case $45E : a="u"
+        Case $2116 : a="No"
+        Case $2013, $2014 : a="-"
+        Case $2018, $2019 : a="'"
+        Case $201C, $201D : a=Chr(34)
+        Case $2026 : a="..."
+        Case $A0 : a=" "
+        Case $C0 To $C5, $E0 To $E5, $100, $101, $102, $103, $104, $105 : a="a"
+        Case $C6, $E6 : a="ae"
+        Case $C7, $E7, $106 To $10D : a="c"
+        Case $C8 To $CB, $E8 To $EB, $112 To $11B : a="e"
+        Case $CC To $CF, $EC To $EF : a="i"
+        Case $D1, $F1 : a="n"
+        Case $D2 To $D6, $F2 To $F6 : a="o"
+        Case $D9 To $DC, $F9 To $FC : a="u"
+        Case $DD, $FD, $FF : a="y"
+        Case $DF : a="ss"
+        Case $141, $142 : a="l"
+        Case $15A To $161 : a="s"
+        Case $179 To $17E : a="z"
+        Default : a="?"
+      EndSelect
+    EndIf
+    out+a
+  Next
+  ProcedureReturn out
+EndProcedure
+
 Procedure.i UTF8Size(v.s)
   ProcedureReturn StringByteLength(v,#PB_UTF8)
 EndProcedure
@@ -436,6 +581,7 @@ Procedure.i ConvertFile(Src.s,Dst.s)
   EndIf
   If LoadDatabase(Src)=0 : ProcedureReturn #False : EndIf
   PrintN("Source format: WinBox "+Str(SourceVersion)+".x; records: "+Str(EntryCount))
+  PrintN("Source code page: CP"+Str(ConvertCodePage)+"; transliteration: "+Str(ConvertTranslit))
   If SourceVersion<>3
     PrintN("ERROR: this test mode accepts WinBox 3.x CDB only")
     ProcedureReturn #False
@@ -481,12 +627,21 @@ Procedure.i ConvertFile(Src.s,Dst.s)
               For start=p+5 To nextField-1
                 If B(*Input,start)>127 : changed=1 : Break : EndIf
               Next
-              If changed And IsUTF8(*Input+p+5,fieldLen)
+              If changed And IsUTF8(*Input+p+5,fieldLen) And Not ConvertTranslit
                 ; Already valid UTF-8, preserve bytes exactly.
                 changed=0
               EndIf
               If changed
-                value=Decode1251(*Input+p+5,fieldLen)
+                If IsUTF8(*Input+p+5,fieldLen)
+                  value=DecodeText(*Input+p+5,fieldLen)
+                Else
+                  value=DecodeCodePage(*Input+p+5,fieldLen,ConvertCodePage)
+                EndIf
+                If value=""
+                  PrintN("ERROR: failed to decode record "+Str(recNo)+", field "+Str(field)+" using CP"+Str(ConvertCodePage))
+                  FreeMemory(*out) : ProcedureReturn #False
+                EndIf
+                If ConvertTranslit : value=Transliterate(value) : EndIf
                 newLen=StringByteLength(value,#PB_UTF8)
                 If newLen>255
                   PrintN("ERROR: record "+Str(recNo)+", field "+Str(field)+" exceeds 255 bytes after UTF-8 conversion")
@@ -531,7 +686,7 @@ Procedure.i ConvertFile(Src.s,Dst.s)
     pos=recordEnd
   Wend
   If total=0
-    PrintN("NOTE: no CP1251 fields found (ASCII or valid UTF-8 already).")
+    PrintN("NOTE: no fields required conversion.")
   EndIf
   If pos<>InputBytes
     PrintN("ERROR: source was not fully parsed")
@@ -577,18 +732,35 @@ Procedure.i ConvertFile(Src.s,Dst.s)
 EndProcedure
 
 Procedure Usage()
-  PrintN("(C)heshirCa 2026 | WinBox CDB reader / converter V2.0")
+  PrintN("(C)heshirCa 2026 | WinBox CDB reader / converter V2.1")
   PrintN("Usage: cdb <file.cdb> [TABLE|CSV|JSON|TREE]")
   PrintN("       cdb <file.cdb> /OUTPUT <CSV|JSON|TREE>")
-  PrintN("       cdb /convert <src.cdb> <dst.cdb>")
+  PrintN("       cdb /convert <src.cdb> <dst.cdb> [/CP1251|/CP1250|/CP1252|/CPxxxx] [/translit]")
+  PrintN("       cdb /translit <src.cdb> <dst.cdb> [/CPxxxx]")
 EndProcedure
 
 Define argc.i=CountProgramParameters(), fmt.i=#FmtTable, src.s, option.s, destination.s
+Define j.i, cp.s
 If argc=0
   Usage() : End 0
 EndIf
-If LCase(ProgramParameter(0))="/convert"
-  If argc<>3 : Usage() : End 1 : EndIf
+If LCase(ProgramParameter(0))="/convert" Or LCase(ProgramParameter(0))="/translit"
+  If argc<3 : Usage() : End 1 : EndIf
+  ConvertTranslit = Bool(LCase(ProgramParameter(0))="/translit")
+  For j=3 To argc-1
+    option=LCase(ProgramParameter(j))
+    If option="/translit"
+      ConvertTranslit=#True
+    ElseIf Left(option,3)="/cp"
+      cp=Mid(option,4)
+      If Len(cp)<3 Or Len(cp)>5 Or Val(cp)<1 Or Val(cp)>65535 Or Str(Val(cp))<>cp
+        PrintN("ERROR: invalid code page "+option) : End 1
+      EndIf
+      ConvertCodePage=Val(cp)
+    Else
+      PrintN("ERROR: unknown option "+option) : Usage() : End 1
+    EndIf
+  Next
   If ConvertFile(ProgramParameter(1),ProgramParameter(2))=0 : End 1 : EndIf
   End 0
 EndIf
@@ -613,8 +785,6 @@ End 0
 
 ; IDE Options = PureBasic 6.41 (Windows - x86)
 ; ExecutableFormat = Console
-; CursorPosition = 582
-; FirstLine = 562
 ; Folding = ----
 ; Optimizer
 ; EnableThread
