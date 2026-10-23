@@ -1,652 +1,623 @@
+; MikroTik WinBox CDB reader and CP1251 to UTF-8 converter preserving v3 wrapper.
+; Experimental writer: always creates a new file. Test with a backup.
+; PureBasic 6.x, console executable. No external dependencies.
+; Copyright (C) CheshirCa 2026
+; https://t.me/cheshircanest
+
+EnableExplicit
 OpenConsole()
 
-; Supported renderers selected by the optional second command-line argument.
 Enumeration
-  #OutputTable
-  #OutputCsv
-  #OutputJson
-  #OutputTree
+  #FmtTable
+  #FmtCSV
+  #FmtJSON
+  #FmtTree
 EndEnumeration
 
-; One decoded address-book entry from a MikroTik CDB file.
-; The numeric CDB field ids are mapped to these readable column names:
-;   $01 -> Address
-;   $02 -> User
-;   $03 -> Key
-;   $04 -> Name
-;   $06 -> Owner
-;   $08 -> Group
-;   $0B -> Note
-Structure AddressRecord
+Structure Entry
   Address.s
-  User.s
-  Key.s
-  Name.s
-  Owner.s
+  Login.s
+  Comment.s
   Group.s
-  Note.s
+  Session.s
+  Workspace.s
+  RoMON.s
+  Password.s
+  Kind.s
+  DisplayName.s
+  KeepPassword.s
+  HavePassword.i
+  UnknownFields.i
 EndStructure
 
-; Print command-line help.
-Procedure PrintUsage()
-  PrintN(" ")
-  PrintN("(C)heshirCa 2026")
-  PrintN("Mikrotik CDB file reader")
-  PrintN("Use: cdb <mikrotik_cdb_file.cdb> [CSV|JSON|TREE]")
-  PrintN("Or:  cdb <mikrotik_cdb_file.cdb> /OUTPUT <CSV|JSON|TREE>")
+Global NewList Entries.Entry()
+Global SourceVersion.i, InputBytes.i, *Input, EntryCount.i
+
+Procedure.i B(*P, At.i)
+  ProcedureReturn PeekA(*P + At) & $FF
 EndProcedure
 
-; Parse an output format value. The default is a human-readable table.
-; Accepted forms:
-;   cdb file.cdb
-;   cdb file.cdb CSV
-;   cdb file.cdb JSON
-;   cdb file.cdb TREE
-;   cdb file.cdb /CSV
-;   cdb file.cdb /JSON
-;   cdb file.cdb /TREE
-;   cdb file.cdb /OUTPUT CSV
-;   cdb file.cdb --format JSON
-Procedure.i ParseOutputFormat(DefaultFormat.i)
-  Format.i = DefaultFormat
-  ParameterCount = CountProgramParameters()
-
-  If ParameterCount >= 2
-    FormatArgument.s = UCase(ProgramParameter(1))
-
-    Select FormatArgument
-      Case "CSV", "/CSV", "-CSV", "--CSV"
-        Format = #OutputCsv
-      Case "JSON", "/JSON", "-JSON", "--JSON"
-        Format = #OutputJson
-      Case "TREE", "/TREE", "-TREE", "--TREE"
-        Format = #OutputTree
-      Case "/OUTPUT", "-OUTPUT", "--OUTPUT", "/FORMAT", "-FORMAT", "--FORMAT"
-        If ParameterCount >= 3
-          ValueArgument.s = UCase(ProgramParameter(2))
-
-          Select ValueArgument
-            Case "CSV"
-              Format = #OutputCsv
-            Case "JSON"
-              Format = #OutputJson
-            Case "TREE"
-              Format = #OutputTree
-            Case "TABLE"
-              Format = #OutputTable
-            Default
-              PrintN("Unknown output format: " + ProgramParameter(2))
-              PrintUsage()
-              End 1
-          EndSelect
-        Else
-          PrintN("Missing output format after " + ProgramParameter(1))
-          PrintUsage()
-          End 1
-        EndIf
-      Case "TABLE"
-        Format = #OutputTable
-      Default
-        PrintN("Unknown output option: " + ProgramParameter(1))
-        PrintUsage()
-        End 1
-    EndSelect
-  EndIf
-
-  ProcedureReturn Format
+Procedure.i LE32(*P, At.i)
+  ProcedureReturn B(*P,At) | (B(*P,At+1)<<8) | (B(*P,At+2)<<16) | (B(*P,At+3)<<24)
 EndProcedure
 
-; Convert one Windows-1251 byte to a PureBasic Unicode character.
-; MikroTik WinBox address-book strings in this file are stored as raw CP1251
-; bytes, so printing them with Chr(byte) directly produces mojibake for
-; Cyrillic text. PureBasic strings are Unicode, so every non-ASCII CP1251 code
-; point has to be mapped explicitly.
-Procedure.s CP1251Char(ByteValue.i)
-  ; CP1251 uses the $80-$BF range for punctuation and several Cyrillic
-  ; characters that are not part of the contiguous Russian alphabet block.
-  Select ByteValue
-    Case $80 : ProcedureReturn Chr($0402)
-    Case $81 : ProcedureReturn Chr($0403)
-    Case $82 : ProcedureReturn Chr($201A)
-    Case $83 : ProcedureReturn Chr($0453)
-    Case $84 : ProcedureReturn Chr($201E)
-    Case $85 : ProcedureReturn Chr($2026)
-    Case $86 : ProcedureReturn Chr($2020)
-    Case $87 : ProcedureReturn Chr($2021)
-    Case $88 : ProcedureReturn Chr($20AC)
-    Case $89 : ProcedureReturn Chr($2030)
-    Case $8A : ProcedureReturn Chr($0409)
-    Case $8B : ProcedureReturn Chr($2039)
-    Case $8C : ProcedureReturn Chr($040A)
-    Case $8D : ProcedureReturn Chr($040C)
-    Case $8E : ProcedureReturn Chr($040B)
-    Case $8F : ProcedureReturn Chr($040F)
-    Case $90 : ProcedureReturn Chr($0452)
-    Case $91 : ProcedureReturn Chr($2018)
-    Case $92 : ProcedureReturn Chr($2019)
-    Case $93 : ProcedureReturn Chr($201C)
-    Case $94 : ProcedureReturn Chr($201D)
-    Case $95 : ProcedureReturn Chr($2022)
-    Case $96 : ProcedureReturn Chr($2013)
-    Case $97 : ProcedureReturn Chr($2014)
-    Case $99 : ProcedureReturn Chr($2122)
-    Case $9A : ProcedureReturn Chr($0459)
-    Case $9B : ProcedureReturn Chr($203A)
-    Case $9C : ProcedureReturn Chr($045A)
-    Case $9D : ProcedureReturn Chr($045C)
-    Case $9E : ProcedureReturn Chr($045B)
-    Case $9F : ProcedureReturn Chr($045F)
-    Case $A0 : ProcedureReturn Chr($00A0)
-    Case $A1 : ProcedureReturn Chr($040E)
-    Case $A2 : ProcedureReturn Chr($045E)
-    Case $A3 : ProcedureReturn Chr($0408)
-    Case $A4 : ProcedureReturn Chr($00A4)
-    Case $A5 : ProcedureReturn Chr($0490)
-    Case $A6 : ProcedureReturn Chr($00A6)
-    Case $A7 : ProcedureReturn Chr($00A7)
-    Case $A8 : ProcedureReturn Chr($0401)
-    Case $A9 : ProcedureReturn Chr($00A9)
-    Case $AA : ProcedureReturn Chr($0404)
-    Case $AB : ProcedureReturn Chr($00AB)
-    Case $AC : ProcedureReturn Chr($00AC)
-    Case $AD : ProcedureReturn Chr($00AD)
-    Case $AE : ProcedureReturn Chr($00AE)
-    Case $AF : ProcedureReturn Chr($0407)
-    Case $B0 : ProcedureReturn Chr($00B0)
-    Case $B1 : ProcedureReturn Chr($00B1)
-    Case $B2 : ProcedureReturn Chr($0406)
-    Case $B3 : ProcedureReturn Chr($0456)
-    Case $B4 : ProcedureReturn Chr($0491)
-    Case $B5 : ProcedureReturn Chr($00B5)
-    Case $B6 : ProcedureReturn Chr($00B6)
-    Case $B7 : ProcedureReturn Chr($00B7)
-    Case $B8 : ProcedureReturn Chr($0451)
-    Case $B9 : ProcedureReturn Chr($2116)
-    Case $BA : ProcedureReturn Chr($0454)
-    Case $BB : ProcedureReturn Chr($00BB)
-    Case $BC : ProcedureReturn Chr($0458)
-    Case $BD : ProcedureReturn Chr($0405)
-    Case $BE : ProcedureReturn Chr($0455)
-    Case $BF : ProcedureReturn Chr($0457)
-  EndSelect
-
-  ; The main Russian alphabet in CP1251 is contiguous:
-  ; $C0-$FF maps to Unicode $0410-$044F.
-  If ByteValue >= $C0 And ByteValue <= $FF
-    ProcedureReturn Chr($0410 + ByteValue - $C0)
-  EndIf
-
-  ; ASCII and control characters are identical for the values used here.
-  ProcedureReturn Chr(ByteValue)
-EndProcedure
-
-; Decode a CP1251 byte sequence from the CDB buffer into a PureBasic string.
-; The buffer pointer points directly into the loaded file; Length is the string
-; length taken from the CDB field header.
-Procedure.s DecodeCP1251(*Buffer, Length.i)
-  Result.s = ""
-
-  For i = 0 To Length - 1
-    Result + CP1251Char(PeekA(*Buffer + i) & $FF)
-  Next
-
-  ProcedureReturn Result
-EndProcedure
-
-; Detect the common address-item header inside the MikroTik CDB stream.
-; Observed records start with several service bytes, then this stable marker:
-;   00 00 00 4D 32
-; Some files have an item-size byte immediately before the marker. The older
-; file also contains 00 FF 88 00 inside the header, but newer files do not
-; always use that sequence. Therefore the 00 00 00 4D 32 marker is the safer
-; record boundary for both tested file variants.
-Procedure.i IsRecordHeader(*Buffer, Position.i, FileLength.i)
-  If Position <= FileLength - 5
-    If PeekA(*Buffer + Position) = 0 And
-       PeekA(*Buffer + Position + 1) = 0 And
-       PeekA(*Buffer + Position + 2) = 0 And
-       PeekA(*Buffer + Position + 3) = $4D And
-       PeekA(*Buffer + Position + 4) = $32
-      ProcedureReturn #True
-    EndIf
-  EndIf
-
-  ProcedureReturn #False
-EndProcedure
-
-; Small helper used while calculating column widths.
-Procedure.i MaxInt(Value1.i, Value2.i)
-  If Value1 > Value2
-    ProcedureReturn Value1
-  EndIf
-
-  ProcedureReturn Value2
-EndProcedure
-
-; Build a repeated text fragment. Used for ASCII table borders.
-Procedure.s RepeatText(Text.s, Count.i)
-  Result.s = ""
-
-  For i = 1 To Count
-    Result + Text
-  Next
-
-  ProcedureReturn Result
-EndProcedure
-
-; Pad text on the right so all console table columns have a stable width.
-Procedure.s PadRight(Text.s, Width.i)
-  If Len(Text) < Width
-    ProcedureReturn Text + Space(Width - Len(Text))
-  EndIf
-
-  ProcedureReturn Text
-EndProcedure
-
-; Print a horizontal separator for the current table layout.
-; The +2 in every column accounts for one leading and one trailing space.
-Procedure PrintSeparator(WName.i, WAddress.i, WUser.i, WGroup.i, WOwner.i, WKey.i, WNote.i)
-  PrintN("+" + RepeatText("-", WName + 2) +
-         "+" + RepeatText("-", WAddress + 2) +
-         "+" + RepeatText("-", WUser + 2) +
-         "+" + RepeatText("-", WGroup + 2) +
-         "+" + RepeatText("-", WOwner + 2) +
-         "+" + RepeatText("-", WKey + 2) +
-         "+" + RepeatText("-", WNote + 2) + "+")
-EndProcedure
-
-; Print one data row or the header row using the same column widths.
-Procedure PrintTableRow(Name.s, Address.s, User.s, Group.s, Owner.s, Key.s, Note.s,
-                        WName.i, WAddress.i, WUser.i, WGroup.i, WOwner.i, WKey.i, WNote.i)
-  PrintN("| " + PadRight(Name, WName) +
-         " | " + PadRight(Address, WAddress) +
-         " | " + PadRight(User, WUser) +
-         " | " + PadRight(Group, WGroup) +
-         " | " + PadRight(Owner, WOwner) +
-         " | " + PadRight(Key, WKey) +
-         " | " + PadRight(Note, WNote) + " |")
-EndProcedure
-
-; Print all decoded address records as an aligned ASCII table.
-; The first pass finds the widest value in every column, then the second pass
-; prints the header and all rows using those widths.
-Procedure PrintRecords(List Records.AddressRecord())
-  ; Start with header widths so even an empty file still has a valid table.
-  WName = Len("Name")
-  WAddress = Len("Address")
-  WUser = Len("User")
-  WGroup = Len("Group")
-  WOwner = Len("Owner")
-  WKey = Len("Key")
-  WNote = Len("Note")
-
-  ; Grow every width to fit the longest decoded value in that column.
-  ForEach Records()
-    WName = MaxInt(WName, Len(Records()\Name))
-    WAddress = MaxInt(WAddress, Len(Records()\Address))
-    WUser = MaxInt(WUser, Len(Records()\User))
-    WGroup = MaxInt(WGroup, Len(Records()\Group))
-    WOwner = MaxInt(WOwner, Len(Records()\Owner))
-    WKey = MaxInt(WKey, Len(Records()\Key))
-    WNote = MaxInt(WNote, Len(Records()\Note))
-  Next
-
-  ; Header.
-  PrintSeparator(WName, WAddress, WUser, WGroup, WOwner, WKey, WNote)
-  PrintTableRow("Name", "Address", "User", "Group", "Owner", "Key", "Note",
-                WName, WAddress, WUser, WGroup, WOwner, WKey, WNote)
-  PrintSeparator(WName, WAddress, WUser, WGroup, WOwner, WKey, WNote)
-
-  ; Body.
-  ForEach Records()
-    PrintTableRow(Records()\Name, Records()\Address, Records()\User, Records()\Group,
-                  Records()\Owner, Records()\Key, Records()\Note,
-                  WName, WAddress, WUser, WGroup, WOwner, WKey, WNote)
-  Next
-
-  PrintSeparator(WName, WAddress, WUser, WGroup, WOwner, WKey, WNote)
-EndProcedure
-
-; Escape one CSV cell according to RFC 4180 rules:
-; wrap the value in double quotes and double any quote inside the value.
-Procedure.s CsvCell(Text.s)
-  ProcedureReturn Chr(34) + ReplaceString(Text, Chr(34), Chr(34) + Chr(34)) + Chr(34)
-EndProcedure
-
-; Print decoded records as CSV. The column order matches the table output.
-Procedure PrintRecordsCsv(List Records.AddressRecord())
-  PrintN(CsvCell("Name") + "," +
-         CsvCell("Address") + "," +
-         CsvCell("User") + "," +
-         CsvCell("Group") + "," +
-         CsvCell("Owner") + "," +
-         CsvCell("Key") + "," +
-         CsvCell("Note"))
-
-  ForEach Records()
-    PrintN(CsvCell(Records()\Name) + "," +
-           CsvCell(Records()\Address) + "," +
-           CsvCell(Records()\User) + "," +
-           CsvCell(Records()\Group) + "," +
-           CsvCell(Records()\Owner) + "," +
-           CsvCell(Records()\Key) + "," +
-           CsvCell(Records()\Note))
-  Next
-EndProcedure
-
-; Escape a string for JSON output. Unicode characters can be printed as-is;
-; only quotes, backslashes, and JSON control characters need escaping.
-Procedure.s JsonString(Text.s)
-  Result.s = Chr(34)
-
-  For i = 1 To Len(Text)
-    Char.s = Mid(Text, i, 1)
-    Code = Asc(Char)
-
-    Select Code
-      Case 8
-        Result + "\b"
-      Case 9
-        Result + "\t"
-      Case 10
-        Result + "\n"
-      Case 12
-        Result + "\f"
-      Case 13
-        Result + "\r"
-      Case 34
-        Result + "\" + Chr(34)
-      Case 92
-        Result + "\\"
-      Default
-        If Code < 32
-          Result + "\u" + Right("0000" + Hex(Code), 4)
-        Else
-          Result + Char
-        EndIf
-    EndSelect
-  Next
-
-  Result + Chr(34)
-  ProcedureReturn Result
-EndProcedure
-
-; Print decoded records as a JSON array of objects.
-Procedure PrintRecordsJson(List Records.AddressRecord())
-  PrintN("[")
-
-  ForEach Records()
-    Line.s = "  {" +
-             Chr(34) + "Name" + Chr(34) + ": " + JsonString(Records()\Name) + ", " +
-             Chr(34) + "Address" + Chr(34) + ": " + JsonString(Records()\Address) + ", " +
-             Chr(34) + "User" + Chr(34) + ": " + JsonString(Records()\User) + ", " +
-             Chr(34) + "Group" + Chr(34) + ": " + JsonString(Records()\Group) + ", " +
-             Chr(34) + "Owner" + Chr(34) + ": " + JsonString(Records()\Owner) + ", " +
-             Chr(34) + "Key" + Chr(34) + ": " + JsonString(Records()\Key) + ", " +
-             Chr(34) + "Note" + Chr(34) + ": " + JsonString(Records()\Note) + "}"
-
-    If ListIndex(Records()) < ListSize(Records()) - 1
-      Line + ","
-    EndIf
-
-    PrintN(Line)
-  Next
-
-  PrintN("]")
-EndProcedure
-
-; Return a stable group title for tree output. Empty group names are possible in
-; malformed or partial files, so they are displayed explicitly.
-Procedure.s TreeGroupTitle(GroupName.s)
-  If GroupName = ""
-    ProcedureReturn "(no group)"
-  EndIf
-
-  ProcedureReturn GroupName
-EndProcedure
-
-; Return the visible record label for tree output. Prefer the human-readable
-; name, then fall back to the address, then to a generic placeholder.
-Procedure.s TreeRecordTitle(Name.s, Address.s)
-  If Name <> ""
-    ProcedureReturn Name
-  EndIf
-
-  If Address <> ""
-    ProcedureReturn Address
-  EndIf
-
-  ProcedureReturn "(unnamed)"
-EndProcedure
-
-; Print one field under a record node.
-Procedure PrintTreeField(Prefix.s, IsLast.i, Label.s, Value.s)
-  If IsLast
-    PrintN(Prefix + "`-- " + Label + ": " + Value)
-  Else
-    PrintN(Prefix + "|-- " + Label + ": " + Value)
-  EndIf
-EndProcedure
-
-; Print decoded records as a group-based tree. Group names are roots, records
-; are children, and selected record fields are printed as leaves.
-Procedure PrintRecordsTree(List Records.AddressRecord())
-  NewList Groups.s()
-  NewMap SeenGroups.i()
-
-  ; Preserve the original CDB order: add each group the first time it appears.
-  ForEach Records()
-    GroupKey.s = Records()\Group
-
-    If FindMapElement(SeenGroups(), GroupKey) = 0
-      AddMapElement(SeenGroups(), GroupKey)
-      SeenGroups() = #True
-
-      AddElement(Groups())
-      Groups() = GroupKey
-    EndIf
-  Next
-
-  ForEach Groups()
-    If ListIndex(Groups()) > 0
-      PrintN("")
-    EndIf
-
-    PrintN(TreeGroupTitle(Groups()))
-
-    ; Count records in this group before printing them so the last child can use
-    ; the closing tree branch (`-- instead of |--).
-    GroupRecordCount = 0
-    ForEach Records()
-      If Records()\Group = Groups()
-        GroupRecordCount + 1
-      EndIf
-    Next
-
-    GroupRecordIndex = 0
-    ForEach Records()
-      If Records()\Group = Groups()
-        GroupRecordIndex + 1
-        IsLastRecord = Bool(GroupRecordIndex = GroupRecordCount)
-
-        If IsLastRecord
-          RecordPrefix.s = "    "
-          FieldPrefix.s = "    "
-          PrintN("`-- " + TreeRecordTitle(Records()\Name, Records()\Address))
-        Else
-          RecordPrefix = "|   "
-          FieldPrefix = "|   "
-          PrintN("|-- " + TreeRecordTitle(Records()\Name, Records()\Address))
-        EndIf
-
-        ; Address, User, Owner, and Key are always printed. Note is optional, so
-        ; it changes which field should be drawn as the last tree leaf.
-        FieldCount = 4
-        If Records()\Note <> ""
-          FieldCount + 1
-        EndIf
-
-        PrintTreeField(FieldPrefix, Bool(FieldCount = 1), "Address", Records()\Address)
-        PrintTreeField(FieldPrefix, Bool(FieldCount = 2), "User", Records()\User)
-        PrintTreeField(FieldPrefix, Bool(FieldCount = 3), "Owner", Records()\Owner)
-        PrintTreeField(FieldPrefix, Bool(FieldCount = 4), "Key", Records()\Key)
-
-        If Records()\Note <> ""
-          PrintTreeField(FieldPrefix, #True, "Note", Records()\Note)
-        EndIf
-      EndIf
-    Next
-  Next
-EndProcedure
-
-If CountProgramParameters() <> 0
-  FileName.s = ProgramParameter()
-  OutputFormat = ParseOutputFormat(#OutputTable)
-
-  ; Open the CDB file shared-read so it can still be inspected by other tools
-  ; while this program is reading it.
-  If ReadFile(0, FileName, #PB_File_SharedRead)
-    Length = Lof(0)
-    *MemoryID = AllocateMemory(Length)
-
-    If *MemoryID
-      ; Load the complete file into memory. The parser below needs random byte
-      ; access and frequently looks ahead a few bytes.
-      ReadData(0, *MemoryID, Length)
-
-      NewList Records.AddressRecord()
-
-      ; Temporary fields for the record currently being decoded. A record is
-      ; finalized when the parser encounters the next header marker.
-      Address.s = ""
-      User.s = ""
-      Key.s = ""
-      Name.s = ""
-      Owner.s = ""
-      Group.s = ""
-      Note.s = ""
-      HaveFields = #False
-      i = 0
-
-      ; Walk through the file byte by byte. Only two byte patterns are relevant:
-      ;   00 00 00 4D 32
-      ;     Stable marker found inside each stored address-book item header.
-      ;     It is used as the record boundary.
-      ;
-      ;   <field-id> 00 00 21 <length> <cp1251 bytes>
-      ;     String field payload. The length byte tells exactly how many bytes
-      ;     belong to the string, so service bytes after the string are ignored
-      ;     instead of being printed as garbage characters.
-      While i <= Length - 5
-        If IsRecordHeader(*MemoryID, i, Length)
-          ; A new header marker means the previous item is complete.
-          ; Ignore leading markers before any fields have been collected.
-          If HaveFields
-            AddElement(Records())
-            Records()\Address = Address
-            Records()\User = User
-            Records()\Key = Key
-            Records()\Name = Name
-            Records()\Owner = Owner
-            Records()\Group = Group
-            Records()\Note = Note
-
-            ; Clear temporary values before collecting the next record.
-            Address = ""
-            User = ""
-            Key = ""
-            Name = ""
-            Owner = ""
-            Group = ""
-            Note = ""
-            HaveFields = #False
-          EndIf
-
-          i + 5
-
-        ElseIf PeekA(*MemoryID + i + 1) = 0 And PeekA(*MemoryID + i + 2) = 0 And PeekA(*MemoryID + i + 3) = $21
-          FieldId = PeekA(*MemoryID + i) & $FF
-          StringLength = PeekA(*MemoryID + i + 4) & $FF
-
-          ; Make sure the declared string length stays inside the loaded file.
-          ; If it does not, continue scanning one byte later rather than reading
-          ; past the buffer end.
-          If i + 5 + StringLength <= Length
-            FieldValue.s = DecodeCP1251(*MemoryID + i + 5, StringLength)
-            HaveFields = #True
-
-            ; Put the decoded string into the proper output column.
-            ; Unknown field ids are skipped, but scanning continues normally.
-            Select FieldId
-              Case $01
-                Address = FieldValue
-              Case $02
-                User = FieldValue
-              Case $03
-                Key = FieldValue
-              Case $04
-                Name = FieldValue
-              Case $06
-                Owner = FieldValue
-              Case $08
-                Group = FieldValue
-              Case $0B
-                Note = FieldValue
-            EndSelect
-
-            ; Jump over the complete encoded string. This is the important part
-            ; that prevents trailing record metadata bytes from being printed.
-            i + 5 + StringLength
-          Else
-            i + 1
-          EndIf
-
-        Else
-          i + 1
-        EndIf
-      Wend
-
-      ; The last record is not followed by another marker, so flush it after
-      ; the scan finishes.
-      If HaveFields
-        AddElement(Records())
-        Records()\Address = Address
-        Records()\User = User
-        Records()\Key = Key
-        Records()\Name = Name
-        Records()\Owner = Owner
-        Records()\Group = Group
-        Records()\Note = Note
-      EndIf
-
-      ; Render the decoded records only after the full file was parsed, because
-      ; table column widths depend on all rows. CSV and JSON also benefit from
-      ; having one shared parsed representation.
-      Select OutputFormat
-        Case #OutputCsv
-          PrintRecordsCsv(Records())
-        Case #OutputJson
-          PrintRecordsJson(Records())
-        Case #OutputTree
-          PrintRecordsTree(Records())
-        Default
-          PrintRecords(Records())
+Procedure.s Decode1251(*P, N.i)
+  Protected i.i, x.i, r.s = ""
+  For i=0 To N-1
+    x=B(*P,i)
+    If x >= $C0
+      x=$0410+x-$C0
+    Else
+      Select x
+        Case $80 : x=$0402
+        Case $81 : x=$0403
+        Case $82 : x=$201A
+        Case $83 : x=$0453
+        Case $84 : x=$201E
+        Case $85 : x=$2026
+        Case $86 : x=$2020
+        Case $87 : x=$2021
+        Case $88 : x=$20AC
+        Case $89 : x=$2030
+        Case $8A : x=$0409
+        Case $8B : x=$2039
+        Case $8C : x=$040A
+        Case $8D : x=$040C
+        Case $8E : x=$040B
+        Case $8F : x=$040F
+        Case $90 : x=$0452
+        Case $91 : x=$2018
+        Case $92 : x=$2019
+        Case $93 : x=$201C
+        Case $94 : x=$201D
+        Case $95 : x=$2022
+        Case $96 : x=$2013
+        Case $97 : x=$2014
+        Case $99 : x=$2122
+        Case $9A : x=$0459
+        Case $9B : x=$203A
+        Case $9C : x=$045A
+        Case $9D : x=$045C
+        Case $9E : x=$045B
+        Case $9F : x=$045F
+        Case $A0 : x=$00A0
+        Case $A1 : x=$040E
+        Case $A2 : x=$045E
+        Case $A3 : x=$0408
+        Case $A4 : x=$00A4
+        Case $A5 : x=$0490
+        Case $A6 : x=$00A6
+        Case $A7 : x=$00A7
+        Case $A8 : x=$0401
+        Case $A9 : x=$00A9
+        Case $AA : x=$0404
+        Case $AB : x=$00AB
+        Case $AC : x=$00AC
+        Case $AD : x=$00AD
+        Case $AE : x=$00AE
+        Case $AF : x=$0407
+        Case $B0 : x=$00B0
+        Case $B1 : x=$00B1
+        Case $B2 : x=$0406
+        Case $B3 : x=$0456
+        Case $B4 : x=$0491
+        Case $B5 : x=$00B5
+        Case $B6 : x=$00B6
+        Case $B7 : x=$00B7
+        Case $B8 : x=$0451
+        Case $B9 : x=$2116
+        Case $BA : x=$0454
+        Case $BB : x=$00BB
+        Case $BC : x=$0458
+        Case $BD : x=$0405
+        Case $BE : x=$0455
+        Case $BF : x=$0457
       EndSelect
-
-      FreeMemory(*MemoryID)
     EndIf
+    r + Chr(x)
+  Next
+  ProcedureReturn r
+EndProcedure
 
-    CloseFile(0)
-  Else
-    PrintN("Can't open file: " + FileName)
+Procedure.i IsUTF8(*Data, N.i)
+  Protected i.i, b0.i, b1.i, b2.i, b3.i, count.i
+  i=0
+  While i<N
+    b0=B(*Data,i)
+    If b0<$80
+      i+1 : Continue
+    EndIf
+    If b0>=$C2 And b0<=$DF
+      count=2
+    ElseIf b0>=$E0 And b0<=$EF
+      count=3
+    ElseIf b0>=$F0 And b0<=$F4
+      count=4
+    Else
+      ProcedureReturn #False
+    EndIf
+    If i+count>N : ProcedureReturn #False : EndIf
+    b1=B(*Data,i+1)
+    If b1<$80 Or b1>$BF : ProcedureReturn #False : EndIf
+    If count>=3
+      b2=B(*Data,i+2)
+      If b2<$80 Or b2>$BF : ProcedureReturn #False : EndIf
+      If b0=$E0 And b1<$A0 : ProcedureReturn #False : EndIf
+      If b0=$ED And b1>=$A0 : ProcedureReturn #False : EndIf
+    EndIf
+    If count=4
+      b3=B(*Data,i+3)
+      If b3<$80 Or b3>$BF : ProcedureReturn #False : EndIf
+      If b0=$F0 And b1<$90 : ProcedureReturn #False : EndIf
+      If b0=$F4 And b1>$8F : ProcedureReturn #False : EndIf
+    EndIf
+    i+count
+  Wend
+  ProcedureReturn #True
+EndProcedure
+
+Procedure.s DecodeText(*P, N.i)
+  If N=0 : ProcedureReturn "" : EndIf
+  ; v3 may contain UTF-8 after conversion, while native v3 uses CP1251.
+  ; Select encoding for each textual field, not for the entire file.
+  If SourceVersion=4 Or IsUTF8(*P,N)
+    Protected *tmp = AllocateMemory(N+1)
+    Protected decoded.s
+    If *tmp=0 : ProcedureReturn "" : EndIf
+    CopyMemory(*P,*tmp,N)
+    PokeA(*tmp+N,0)
+    decoded=PeekS(*tmp,-1,#PB_UTF8)
+    FreeMemory(*tmp)
+    ProcedureReturn decoded
   EndIf
-Else
-  PrintUsage()
-EndIf
+  ProcedureReturn Decode1251(*P,N)
+EndProcedure
 
-; PureBasic IDE metadata.
-; IDE Options = PureBasic 6.40 (Windows - x86)
+Procedure.i LoadDatabase(FileName.s)
+  Protected f.i, length.i, pos.i, n.i, stop.i, k.i, p.i, fid.i, vlen.i, unknown.i
+  Protected value.s
+  f=ReadFile(#PB_Any,FileName,#PB_File_SharedRead)
+  If f=0 : PrintN("ERROR: Cannot open " + FileName) : ProcedureReturn #False : EndIf
+  length=Lof(f)
+  If length<14
+    CloseFile(f) : PrintN("ERROR: File too short") : ProcedureReturn #False
+  EndIf
+  *Input=AllocateMemory(length)
+  If *Input=0
+    CloseFile(f) : PrintN("ERROR: Out of memory") : ProcedureReturn #False
+  EndIf
+  InputBytes=length
+  If ReadData(f,*Input,length)<>length
+    CloseFile(f) : PrintN("ERROR: Read error") : ProcedureReturn #False
+  EndIf
+  CloseFile(f)
+  If B(*Input,0)<>$0D Or B(*Input,1)<>$F0 Or B(*Input,2)<>$1D Or B(*Input,3)<>$C0
+    PrintN("ERROR: Invalid CDB signature") : ProcedureReturn #False
+  EndIf
+  pos=4
+  SourceVersion=0
+  ClearList(Entries())
+  While pos<length
+    If pos+6>length : PrintN("ERROR: Truncated record header") : ProcedureReturn #False : EndIf
+    n=LE32(*Input,pos)
+    If n<6 Or n>length-pos-4 Or B(*Input,pos+4)<>$4D Or B(*Input,pos+5)<>$32
+      PrintN("ERROR: Invalid record at byte " + Str(pos)) : ProcedureReturn #False
+    EndIf
+    stop=pos+4+n
+    k=pos+6
+    If k+4>stop
+      PrintN("ERROR: Truncated record type at byte "+Str(pos)) : ProcedureReturn #False
+    EndIf
+    If B(*Input,k)=$01 And B(*Input,k+1)=$00 And B(*Input,k+2)=$FF And B(*Input,k+3)=$88
+      If SourceVersion=4
+        PrintN("ERROR: Mixed WinBox 3 and 4 records") : ProcedureReturn #False
+      EndIf
+      SourceVersion=3
+    ElseIf (B(*Input,k)=$07 And B(*Input,k+1)=0 And B(*Input,k+2)=0 And B(*Input,k+3)=1) Or (B(*Input,k)=$05 And B(*Input,k+1)=0 And B(*Input,k+2)=0 And B(*Input,k+3)=0)
+      If SourceVersion=3
+        PrintN("ERROR: Mixed WinBox 3 and 4 records") : ProcedureReturn #False
+      EndIf
+      SourceVersion=4
+    Else
+      PrintN("ERROR: Unknown record kind at byte " + Str(pos)) : ProcedureReturn #False
+    EndIf
+    AddElement(Entries())
+    Entries()\Kind=RSet(Hex(B(*Input,k)),2,"0")+RSet(Hex(B(*Input,k+1)),2,"0")+RSet(Hex(B(*Input,k+2)),2,"0")+RSet(Hex(B(*Input,k+3)),2,"0")
+    ; Identify strings inside this strictly length-bounded record. WinBox 3 uses
+    ; a larger wrapper. Recognize both explicit and implicit name framing.
+    p=pos+10
+    While p+5<=stop
+      fid=-1
+      ; The implicit (09 00 FE 21) field represents connection name (id 0).
+      If B(*Input,p)=$09 And B(*Input,p+1)=0 And B(*Input,p+2)=$FE And B(*Input,p+3)=$21
+        fid=0
+      ElseIf B(*Input,p+1)=0 And B(*Input,p+2)=0 And B(*Input,p+3)=$21
+        fid=B(*Input,p)
+      EndIf
+      If fid>=0
+        vlen=B(*Input,p+4)
+        If p+5+vlen<=stop
+          value=DecodeText(*Input+p+5,vlen)
+          Select fid
+            Case 0 : Entries()\DisplayName=value
+            Case 1 : Entries()\Address=value
+            Case 2 : Entries()\Login=value
+            Case 3 : Entries()\Password=value : If vlen>0 : Entries()\HavePassword=1 : EndIf
+            Case 4 : Entries()\Comment=value
+            Case 6
+              If SourceVersion=4
+                Entries()\KeepPassword=value
+              Else
+                Entries()\Session=value
+              EndIf
+            Case 8 : Entries()\Group=value
+            Case 11 : Entries()\RoMON=value
+            Case 12 : Entries()\Workspace=value
+            Default : Entries()\UnknownFields+1
+          EndSelect
+          p+5+vlen
+          Continue
+        EndIf
+      EndIf
+      p+1
+    Wend
+    pos=stop
+  Wend
+  EntryCount=ListSize(Entries())
+  If SourceVersion=0
+    PrintN("ERROR: CDB version could not be determined unambiguously")
+    ProcedureReturn #False
+  EndIf
+  ProcedureReturn #True
+EndProcedure
+
+Procedure.s JsonQuote(v.s)
+  Protected i.i, c.i, s.s=Chr(34), ch.s
+  For i=1 To Len(v)
+    ch=Mid(v,i,1) : c=Asc(ch)
+    Select c
+      Case 34 : s+"\"+Chr(34)
+      Case 92 : s+"\\"
+      Case 10 : s+"\n"
+      Case 13 : s+"\r"
+      Case 9 : s+"\t"
+      Default
+        If c<32 : s+"\u"+RSet(Hex(c),4,"0") : Else : s+ch : EndIf
+    EndSelect
+  Next
+  ProcedureReturn s+Chr(34)
+EndProcedure
+
+Procedure.s CSVCell(Value.s)
+  Protected s.s = ReplaceString(Value, Chr(34), Chr(34)+Chr(34))
+  ProcedureReturn Chr(34)+s+Chr(34)
+EndProcedure
+
+Procedure.s VersionLabel()
+  ProcedureReturn "WinBox " + Str(SourceVersion) + ".x CDB"
+EndProcedure
+
+; Preserve original seven-column table and machine-readable export formats.
+Procedure.s PadField(Value.s, Width.i)
+  If Len(Value)<Width
+    ProcedureReturn Value+Space(Width-Len(Value))
+  EndIf
+  ProcedureReturn Value
+EndProcedure
+
+Procedure.s Separator(Width.i)
+  ProcedureReturn LSet("",Width+2,"-")
+EndProcedure
+
+Procedure.i MaxInt(A.i, B.i)
+  If A >= B
+    ProcedureReturn A
+  EndIf
+  ProcedureReturn B
+EndProcedure
+
+Procedure PrintOutput(Format.i)
+  Protected wName.i=4, wAddress.i=7, wUser.i=4, wGroup.i=5
+  Protected wOwner.i=5, wKey.i=3, wNote.i=4
+  Protected line.s, name.s, idx.i=0
+
+  ; Do not prepend metadata to CSV or JSON: preserve the original schema.
+  If Format=#FmtTable Or Format=#FmtTree
+    PrintN("CDB format: " + VersionLabel() + " | Records: " + Str(EntryCount))
+    PrintN("")
+  EndIf
+
+  Select Format
+    Case #FmtTable
+      ForEach Entries()
+        wName=MaxInt(wName,Len(Entries()\Comment))
+        wAddress=MaxInt(wAddress,Len(Entries()\Address))
+        wUser=MaxInt(wUser,Len(Entries()\Login))
+        wGroup=MaxInt(wGroup,Len(Entries()\Group))
+        wOwner=MaxInt(wOwner,Len(Entries()\Session))
+        wKey=MaxInt(wKey,Len(Entries()\Password))
+        wNote=MaxInt(wNote,Len(Entries()\RoMON))
+      Next
+      line="+"+Separator(wName)+"+"+Separator(wAddress)+"+"+Separator(wUser)+"+"+Separator(wGroup)+"+"+Separator(wOwner)+"+"+Separator(wKey)+"+"+Separator(wNote)+"+"
+      PrintN(line)
+      PrintN("| "+PadField("Name",wName)+" | "+PadField("Address",wAddress)+" | "+PadField("User",wUser)+" | "+PadField("Group",wGroup)+" | "+PadField("Owner",wOwner)+" | "+PadField("Key",wKey)+" | "+PadField("Note",wNote)+" |")
+      PrintN(line)
+      ForEach Entries()
+        PrintN("| "+PadField(Entries()\Comment,wName)+" | "+PadField(Entries()\Address,wAddress)+" | "+PadField(Entries()\Login,wUser)+" | "+PadField(Entries()\Group,wGroup)+" | "+PadField(Entries()\Session,wOwner)+" | "+PadField(Entries()\Password,wKey)+" | "+PadField(Entries()\RoMON,wNote)+" |")
+      Next
+      PrintN(line)
+    Case #FmtCSV
+      PrintN(CSVCell("Name")+","+CSVCell("Address")+","+CSVCell("User")+","+CSVCell("Group")+","+CSVCell("Owner")+","+CSVCell("Key")+","+CSVCell("Note"))
+      ForEach Entries()
+        PrintN(CSVCell(Entries()\Comment)+","+CSVCell(Entries()\Address)+","+CSVCell(Entries()\Login)+","+CSVCell(Entries()\Group)+","+CSVCell(Entries()\Session)+","+CSVCell(Entries()\Password)+","+CSVCell(Entries()\RoMON))
+      Next
+    Case #FmtJSON
+      PrintN("[")
+      ForEach Entries()
+        line="  {"+JsonQuote("Name")+": "+JsonQuote(Entries()\Comment)+", "+JsonQuote("Address")+": "+JsonQuote(Entries()\Address)+", "+JsonQuote("User")+": "+JsonQuote(Entries()\Login)+", "+JsonQuote("Group")+": "+JsonQuote(Entries()\Group)+", "+JsonQuote("Owner")+": "+JsonQuote(Entries()\Session)+", "+JsonQuote("Key")+": "+JsonQuote(Entries()\Password)+", "+JsonQuote("Note")+": "+JsonQuote(Entries()\RoMON)+"}"
+        If idx<EntryCount-1 : line+"," : EndIf
+        PrintN(line)
+        idx+1
+      Next
+      PrintN("]")
+    Case #FmtTree
+      ; Tree remains explicitly selected; simple grouping is retained.
+      NewList Groups.s()
+      NewMap Seen.i()
+      ForEach Entries()
+        If FindMapElement(Seen(),Entries()\Group)=0
+          AddMapElement(Seen(),Entries()\Group)
+          Seen()=1
+          AddElement(Groups())
+          Groups()=Entries()\Group
+        EndIf
+      Next
+      ForEach Groups()
+        name=Groups()
+        If name="" : name="(no group)" : EndIf
+        PrintN(name)
+        ForEach Entries()
+          If Entries()\Group=Groups()
+            PrintN("|-- "+Entries()\Comment)
+            PrintN("|   Address: "+Entries()\Address+" | User: "+Entries()\Login+" | Owner: "+Entries()\Session+" | Key: "+Entries()\Password)
+            If Entries()\RoMON<>"" : PrintN("|   Note: "+Entries()\RoMON) : EndIf
+          EndIf
+        Next
+        PrintN("")
+      Next
+  EndSelect
+EndProcedure
+
+Procedure.i UTF8Size(v.s)
+  ProcedureReturn StringByteLength(v,#PB_UTF8)
+EndProcedure
+
+Procedure.i CheckField(v.s, label.s, index.i)
+  If UTF8Size(v)>254
+    PrintN("ERROR: record " + Str(index) + ", field " + label + ": UTF-8 exceeds 254 bytes")
+    ProcedureReturn #False
+  EndIf
+  ProcedureReturn #True
+EndProcedure
+
+Procedure WriteField(f.i, id.i, v.s, implicit.i=#False)
+  Protected n.i=UTF8Size(v), *buf
+  If implicit
+    WriteAsciiCharacter(f,$09) : WriteAsciiCharacter(f,$00)
+    WriteAsciiCharacter(f,$FE) : WriteAsciiCharacter(f,$21)
+  Else
+    WriteAsciiCharacter(f,id) : WriteAsciiCharacter(f,0)
+    WriteAsciiCharacter(f,0) : WriteAsciiCharacter(f,$21)
+  EndIf
+  WriteAsciiCharacter(f,n)
+  If n>0
+    *buf=AllocateMemory(n+1)
+    If *buf
+      PokeS(*buf,v,-1,#PB_UTF8)
+      WriteData(f,*buf,n)
+      FreeMemory(*buf)
+    EndIf
+  EndIf
+EndProcedure
+
+Procedure.i ConvertFile(Src.s,Dst.s)
+  Protected f.i, pos.i, recordLen.i, recordEnd.i, start.i, p.i, cursor.i
+  Protected field.i, fieldLen.i, nextField.i, delta.i, recordNewLen.i
+  Protected newLen.i, *utf8, value.s, changed.i, total.i, recNo.i
+  Protected *out, outLen.i, capacity.i, outPos.i, recordStart.i, checkPos.i, checkLen.i
+
+  If LCase(Src)=LCase(Dst)
+    PrintN("ERROR: source and destination must differ")
+    ProcedureReturn #False
+  EndIf
+  If FileSize(Dst)>=0
+    PrintN("ERROR: destination already exists: "+Dst)
+    ProcedureReturn #False
+  EndIf
+  If LoadDatabase(Src)=0 : ProcedureReturn #False : EndIf
+  PrintN("Source format: WinBox "+Str(SourceVersion)+".x; records: "+Str(EntryCount))
+  If SourceVersion<>3
+    PrintN("ERROR: this test mode accepts WinBox 3.x CDB only")
+    ProcedureReturn #False
+  EndIf
+
+  ; Preserve the v3 record wrapper, all binary fields and passwords. Only
+  ; rewrite selected text values. Allocate a separate output memory buffer.
+  capacity=InputBytes*3+1024
+  *out=AllocateMemory(capacity)
+  If *out=0 : PrintN("ERROR: out of memory") : ProcedureReturn #False : EndIf
+  CopyMemory(*Input,*out,4)
+  outPos=4
+  pos=4
+  While pos<InputBytes
+    recordLen=LE32(*Input,pos)
+    recordEnd=pos+4+recordLen
+    If recordLen<10 Or recordEnd>InputBytes Or recordEnd<=pos
+      PrintN("ERROR: invalid record length at "+Str(pos))
+      FreeMemory(*out)
+      ProcedureReturn #False
+    EndIf
+    recNo+1
+    recordStart=outPos
+    CopyMemory(*Input+pos,*out+outPos,4)
+    outPos+4
+    cursor=pos+4
+    p=pos+10
+    While p+5<=recordEnd
+      field=-1
+      If B(*Input,p+1)=0 And B(*Input,p+2)=0 And B(*Input,p+3)=$21
+        field=B(*Input,p)
+      EndIf
+      If field>=0
+        fieldLen=B(*Input,p+4)
+        nextField=p+5+fieldLen
+        If nextField<=recordEnd
+          ; Copy header and non-text payload bytes unchanged. Scan every
+          ; length-framed field to avoid false hits inside its payload.
+          Select field
+            Case 4,6,8,11 ; Display comment, owner/session, group, note. Never password (3).
+              ; Only convert high-bit strings. ASCII strings are byte-identical.
+              changed=0
+              For start=p+5 To nextField-1
+                If B(*Input,start)>127 : changed=1 : Break : EndIf
+              Next
+              If changed And IsUTF8(*Input+p+5,fieldLen)
+                ; Already valid UTF-8, preserve bytes exactly.
+                changed=0
+              EndIf
+              If changed
+                value=Decode1251(*Input+p+5,fieldLen)
+                newLen=StringByteLength(value,#PB_UTF8)
+                If newLen>255
+                  PrintN("ERROR: record "+Str(recNo)+", field "+Str(field)+" exceeds 255 bytes after UTF-8 conversion")
+                  FreeMemory(*out)
+                  ProcedureReturn #False
+                EndIf
+                If outPos+(p+5-cursor)+newLen>capacity
+                  PrintN("ERROR: output buffer limit exceeded")
+                  FreeMemory(*out)
+                  ProcedureReturn #False
+                EndIf
+                CopyMemory(*Input+cursor,*out+outPos,p+5-cursor)
+                outPos+p+5-cursor
+                PokeA(*out+outPos-1,newLen)
+                *utf8=AllocateMemory(newLen+1)
+                If *utf8=0
+                  FreeMemory(*out) : ProcedureReturn #False
+                EndIf
+                PokeS(*utf8,value,-1,#PB_UTF8)
+                CopyMemory(*utf8,*out+outPos,newLen)
+                FreeMemory(*utf8)
+                outPos+newLen
+                cursor=nextField
+                total+1
+              EndIf
+          EndSelect
+          p=nextField
+          Continue
+        EndIf
+      EndIf
+      p+1
+    Wend
+    If outPos+(recordEnd-cursor)>capacity
+      PrintN("ERROR: output buffer limit exceeded")
+      FreeMemory(*out)
+      ProcedureReturn #False
+    EndIf
+    CopyMemory(*Input+cursor,*out+outPos,recordEnd-cursor)
+    outPos+recordEnd-cursor
+    recordNewLen=outPos-recordStart-4
+    PokeL(*out+recordStart,recordNewLen)
+    pos=recordEnd
+  Wend
+  If total=0
+    PrintN("NOTE: no CP1251 fields found (ASCII or valid UTF-8 already).")
+  EndIf
+  If pos<>InputBytes
+    PrintN("ERROR: source was not fully parsed")
+    FreeMemory(*out)
+    ProcedureReturn #False
+  EndIf
+  f=CreateFile(#PB_Any,Dst)
+  If f=0
+    PrintN("ERROR: cannot create destination: "+Dst)
+    FreeMemory(*out)
+    ProcedureReturn #False
+  EndIf
+  If WriteData(f,*out,outPos)<>outPos
+    PrintN("ERROR: incomplete write")
+    CloseFile(f)
+    DeleteFile(Dst)
+    FreeMemory(*out)
+    ProcedureReturn #False
+  EndIf
+  CloseFile(f)
+  ; Verify output as records and lengths, before accepting it.
+  checkPos=4
+  While checkPos<outPos
+    If checkPos+10>outPos
+      PrintN("ERROR: generated CDB has incomplete record")
+      DeleteFile(Dst)
+      FreeMemory(*out)
+      ProcedureReturn #False
+    EndIf
+    checkLen=LE32(*out,checkPos)
+    If checkLen<6 Or checkLen>outPos-checkPos-4 Or B(*out,checkPos+4)<>$4D Or B(*out,checkPos+5)<>$32
+      PrintN("ERROR: generated CDB record validation failed")
+      DeleteFile(Dst)
+      FreeMemory(*out)
+      ProcedureReturn #False
+    EndIf
+    checkPos+4+checkLen
+  Wend
+  FreeMemory(*out)
+  PrintN("Created: "+Dst+" ("+Str(outPos)+" bytes; converted fields: "+Str(total)+")")
+  PrintN("NOTE: keeps WinBox 3 wrapper. Test in WinBox 4.4 with a backup.")
+  ProcedureReturn #True
+EndProcedure
+
+Procedure Usage()
+  PrintN("(C)heshirCa 2026 | WinBox CDB reader / converter V2.0")
+  PrintN("Usage: cdb <file.cdb> [TABLE|CSV|JSON|TREE]")
+  PrintN("       cdb <file.cdb> /OUTPUT <CSV|JSON|TREE>")
+  PrintN("       cdb /convert <src.cdb> <dst.cdb>")
+EndProcedure
+
+Define argc.i=CountProgramParameters(), fmt.i=#FmtTable, src.s, option.s, destination.s
+If argc=0
+  Usage() : End 0
+EndIf
+If LCase(ProgramParameter(0))="/convert"
+  If argc<>3 : Usage() : End 1 : EndIf
+  If ConvertFile(ProgramParameter(1),ProgramParameter(2))=0 : End 1 : EndIf
+  End 0
+EndIf
+src=ProgramParameter(0)
+If argc>=2
+  option=UCase(ProgramParameter(1))
+  If option="/OUTPUT" Or option="--FORMAT" Or option="/FORMAT"
+    If argc<3 : Usage() : End 1 : EndIf
+    option=UCase(ProgramParameter(2))
+  EndIf
+  Select option
+    Case "CSV","/CSV" : fmt=#FmtCSV
+    Case "JSON","/JSON" : fmt=#FmtJSON
+    Case "TREE","/TREE" : fmt=#FmtTree
+    Case "TABLE","/TABLE" : fmt=#FmtTable
+    Default : Usage() : End 1
+  EndSelect
+EndIf
+If LoadDatabase(src)=0 : End 1 : EndIf
+PrintOutput(fmt)
+End 0
+
+; IDE Options = PureBasic 6.41 (Windows - x86)
 ; ExecutableFormat = Console
+; CursorPosition = 582
+; FirstLine = 562
+; Folding = ----
+; Optimizer
+; EnableThread
 ; EnableXP
 ; DPIAware
 ; Executable = cdb.exe
